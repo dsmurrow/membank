@@ -5,6 +5,7 @@ edition = "2021"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
 authors = ["Daniel Murrow <dsmurrow@gmail.com>"]
+repository = "https://github.com/dsmurrow/membank"
 
 description = "A pool of reusable memory to prevent unnecessary deallocations"
 keywords = ["no_std", "data", "memory"]
