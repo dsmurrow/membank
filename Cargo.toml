@@ -2,6 +2,13 @@
 name = "membank"
 version = "0.1.0"
 edition = "2021"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+authors = ["Daniel Murrow <dsmurrow@gmail.com>"]
+
+description = "A pool of reusable memory to prevent unnecessary deallocations"
+keywords = ["no_std", "data", "memory"]
+categories = ["memory-management", "no-std"]
 
 [features]
 std = []
