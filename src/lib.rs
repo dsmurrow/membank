@@ -35,6 +35,12 @@ impl<T> AsRef<T> for Loan<T> {
     }
 }
 
+impl<T> AsMut<T> for Loan<T> {
+    fn as_mut(&mut self) -> &mut T {
+        self.deref_mut()
+    }
+}
+
 impl<T> Deref for Loan<T> {
     type Target = T;
 
