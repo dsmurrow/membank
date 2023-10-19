@@ -1,3 +1,4 @@
+#![doc = include_str!("../README.md")]
 #![cfg_attr(not(feature = "std"), no_std)]
 
 #[cfg(not(feature = "std"))]
@@ -6,15 +7,18 @@ extern crate alloc;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-#[cfg(feature = "std")]
-use std::rc::{Rc, Weak};
 #[cfg(not(feature = "std"))]
 use alloc::rc::{Rc, Weak};
+#[cfg(feature = "std")]
+use std::rc::{Rc, Weak};
 
 #[cfg(not(feature = "std"))]
 use core as std;
 
 use std::cell::RefCell;
+use std::cmp::Ordering;
+use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::ops::{Deref, DerefMut, Drop};
 
 /// A smart pointer for memory borrowed from a `MemoryBank<T>`. The data allocation will be preserved
@@ -23,6 +27,12 @@ pub struct Loan<T> {
     reference: Rc<T>,
     list_index: usize,
     parent_index_list: Weak<RefCell<Vec<usize>>>,
+}
+
+impl<T> AsRef<T> for Loan<T> {
+    fn as_ref(&self) -> &T {
+        self.reference.as_ref()
+    }
 }
 
 impl<T> Deref for Loan<T> {
@@ -44,6 +54,50 @@ impl<T> Drop for Loan<T> {
         if let Some(index_list) = self.parent_index_list.upgrade() {
             index_list.borrow_mut().push(self.list_index);
         }
+    }
+}
+
+impl<T: fmt::Debug> fmt::Debug for Loan<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.reference, f)
+    }
+}
+
+impl<T: fmt::Display> fmt::Display for Loan<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.reference, f)
+    }
+}
+
+impl<T> fmt::Pointer for Loan<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Pointer::fmt(&self.reference, f)
+    }
+}
+
+impl<T: Hash> Hash for Loan<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.reference.hash(state)
+    }
+}
+
+impl<T: PartialEq> PartialEq for Loan<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.reference.eq(&other.reference)
+    }
+}
+
+impl<T: Eq> Eq for Loan<T> {}
+
+impl<T: PartialOrd> PartialOrd for Loan<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.reference.partial_cmp(&other.reference)
+    }
+}
+
+impl<T: Ord> Ord for Loan<T> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.reference.cmp(&other.reference)
     }
 }
 
@@ -90,12 +144,50 @@ impl<T: Default> MemoryBank<T> {
     }
 }
 
+impl<T: Clone + Default> MemoryBank<T> {
+    /// Takes out a loan and clones its contents from `item`
+    pub fn take_loan_and_clone(&mut self, item: &T) -> Loan<T> {
+        let mut loan = self.take_loan();
+        loan.clone_from(item);
+        loan
+    }
+}
+
+impl<T> MemoryBank<T> {
+    /// Gives the bank ownership of `value` and returns it in a `Loan`.
+    pub fn deposit(&mut self, value: T) -> Loan<T> {
+        self.list.push(Rc::new(value));
+        let index = self.list.len() - 1;
+
+        Loan {
+            reference: self.list[index].clone(),
+            list_index: index,
+            parent_index_list: Rc::downgrade(&self.available_indeces),
+        }
+    }
+
+    /// Only take a loan if it's from previously used memory, if there is no previously allocated
+    /// memory, returns `None`.
+    pub fn take_old_loan(&mut self) -> Option<Loan<T>> {
+        let index = self.available_indeces.borrow_mut().pop()?;
+
+        Some(Loan {
+            reference: self.list[index].clone(),
+            list_index: index,
+            parent_index_list: Rc::downgrade(&self.available_indeces),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[cfg(not(feature = "std"))]
     use alloc::vec;
+
+    #[cfg(feature = "std")]
+    use std::collections::hash_map::DefaultHasher;
 
     #[test]
     fn basics() {
@@ -147,5 +239,41 @@ mod tests {
         let mut loan2_vec = (0..500).collect::<Vec<i32>>();
         loan2_vec[3] = 5;
         assert_eq!(*loan4, loan2_vec);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn hash_equality() {
+        let mut bank: MemoryBank<String> = MemoryBank::new();
+
+        let string = "Swimming with the fishes";
+
+        let mut loan_string = bank.take_loan();
+        loan_string.push_str(string);
+
+        let mut string_hasher = DefaultHasher::new();
+        string.hash(&mut string_hasher);
+
+        let mut loan_hasher = DefaultHasher::new();
+        loan_string.hash(&mut loan_hasher);
+
+        assert_eq!(string_hasher.finish(), loan_hasher.finish());
+    }
+
+    #[test]
+    fn comparisons() {
+        let n1 = 40;
+        let n2 = 30;
+
+        let mut bank: MemoryBank<i32> = MemoryBank::new();
+
+        let mut loan1 = bank.take_loan();
+        *loan1 = n1;
+
+        let mut loan2 = bank.take_loan();
+        *loan2 = n2;
+
+        assert!(loan1 > loan2);
+        assert_ne!(loan1, loan2);
     }
 }
