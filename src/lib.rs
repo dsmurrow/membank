@@ -8,6 +8,9 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 #[cfg(not(feature = "std"))]
+use alloc::boxed::Box;
+
+#[cfg(not(feature = "std"))]
 use alloc::rc::{Rc, Weak};
 #[cfg(feature = "std")]
 use std::rc::{Rc, Weak};
@@ -20,24 +23,24 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::ops::{Deref, DerefMut, Drop};
+use std::ptr::NonNull;
 
 /// A smart pointer for memory borrowed from a `MemoryBank<T>`. The data allocation will be preserved
 /// even if the initiating `MemoryBank` is dropped.
 pub struct Loan<T> {
-    reference: Rc<T>,
-    list_index: usize,
-    parent_index_list: Weak<RefCell<Vec<usize>>>,
+    reference: NonNull<T>,
+    parent_list: Weak<RefCell<Vec<NonNull<T>>>>,
 }
 
 impl<T> AsRef<T> for Loan<T> {
     fn as_ref(&self) -> &T {
-        self.reference.as_ref()
+        unsafe { self.reference.as_ref() }
     }
 }
 
 impl<T> AsMut<T> for Loan<T> {
     fn as_mut(&mut self) -> &mut T {
-        self.deref_mut()
+        unsafe { self.reference.as_mut() }
     }
 }
 
@@ -45,33 +48,33 @@ impl<T> Deref for Loan<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        unsafe { Rc::as_ptr(&self.reference).as_ref().unwrap() }
+        unsafe { self.reference.as_ref() }
     }
 }
 
 impl<T> DerefMut for Loan<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { Rc::as_ptr(&self.reference).cast_mut().as_mut().unwrap() }
+        unsafe { self.reference.as_mut() }
     }
 }
 
 impl<T> Drop for Loan<T> {
     fn drop(&mut self) {
-        if let Some(index_list) = self.parent_index_list.upgrade() {
-            index_list.borrow_mut().push(self.list_index);
+        if let Some(parent_list) = self.parent_list.upgrade() {
+            parent_list.borrow_mut().push(self.reference);
         }
     }
 }
 
 impl<T: fmt::Debug> fmt::Debug for Loan<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(&self.reference, f)
+        fmt::Debug::fmt(&**self, f)
     }
 }
 
 impl<T: fmt::Display> fmt::Display for Loan<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&self.reference, f)
+        fmt::Display::fmt(&**self, f)
     }
 }
 
@@ -83,13 +86,13 @@ impl<T> fmt::Pointer for Loan<T> {
 
 impl<T: Hash> Hash for Loan<T> {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.reference.hash(state)
+        (**self).hash(state)
     }
 }
 
 impl<T: PartialEq> PartialEq for Loan<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.reference.eq(&other.reference)
+        (**self).eq(&**other)
     }
 }
 
@@ -97,20 +100,19 @@ impl<T: Eq> Eq for Loan<T> {}
 
 impl<T: PartialOrd> PartialOrd for Loan<T> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.reference.partial_cmp(&other.reference)
+        (**self).partial_cmp(&**other)
     }
 }
 
 impl<T: Ord> Ord for Loan<T> {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.reference.cmp(&other.reference)
+        (**self).cmp(&**other)
     }
 }
 
 /// A structure that reuses old data of type `T` to reduce the number of heap allocations.
 pub struct MemoryBank<T> {
-    list: Vec<Rc<T>>,
-    available_indeces: Rc<RefCell<Vec<usize>>>,
+    list: Rc<RefCell<Vec<NonNull<T>>>>,
 }
 
 impl<T: Default> Default for MemoryBank<T> {
@@ -123,8 +125,7 @@ impl<T: Default> MemoryBank<T> {
     /// Creates a new, empty `MemoryBank<T>`. The first loan is guaranteed to be a heap allocation.
     pub fn new() -> Self {
         Self {
-            list: Vec::new(),
-            available_indeces: Rc::new(RefCell::new(Vec::new())),
+            list: Rc::new(RefCell::new(Vec::new()))
         }
     }
 
@@ -133,19 +134,11 @@ impl<T: Default> MemoryBank<T> {
     /// If the loaned memory was previously used, it will be in the exact same state it was in
     /// right before the previous `Loan` got dropped.
     pub fn take_loan(&mut self) -> Loan<T> {
-        let index = self
-            .available_indeces
-            .borrow_mut()
-            .pop()
-            .unwrap_or_else(|| {
-                self.list.push(Rc::new(T::default()));
-                self.list.len() - 1
-            });
+        let ptr = self.list.borrow_mut().pop().unwrap_or_else(|| Self::create_ptr(T::default()));
 
         Loan {
-            reference: self.list[index].clone(),
-            list_index: index,
-            parent_index_list: Rc::downgrade(&self.available_indeces),
+            reference: ptr,
+            parent_list: Rc::downgrade(&self.list),
         }
     }
 }
@@ -160,28 +153,44 @@ impl<T: Clone + Default> MemoryBank<T> {
 }
 
 impl<T> MemoryBank<T> {
+    #[inline]
+    fn create_ptr(value: T) -> NonNull<T> {
+        let bx = Box::new(value);
+
+        NonNull::from(Box::leak(bx))
+    }
+
     /// Gives the bank ownership of `value` and returns it in a `Loan`.
     pub fn deposit(&mut self, value: T) -> Loan<T> {
-        self.list.push(Rc::new(value));
-        let index = self.list.len() - 1;
+        let ptr = Self::create_ptr(value);
 
         Loan {
-            reference: self.list[index].clone(),
-            list_index: index,
-            parent_index_list: Rc::downgrade(&self.available_indeces),
+            reference: ptr,
+            parent_list: Rc::downgrade(&self.list),
         }
     }
 
     /// Only take a loan if it's from previously used memory, if there is no previously allocated
     /// memory, returns `None`.
     pub fn take_old_loan(&mut self) -> Option<Loan<T>> {
-        let index = self.available_indeces.borrow_mut().pop()?;
+        let ptr = self.list.borrow_mut().pop()?;
 
         Some(Loan {
-            reference: self.list[index].clone(),
-            list_index: index,
-            parent_index_list: Rc::downgrade(&self.available_indeces),
+            reference: ptr,
+            parent_list: Rc::downgrade(&self.list),
         })
+    }
+}
+
+impl<T> Drop for MemoryBank<T> {
+    fn drop(&mut self) {
+        let mut borrowed = self.list.borrow_mut();
+
+        while let Some(nn_ptr) = borrowed.pop() {
+            unsafe {
+                let _bx = Box::from_raw(nn_ptr.as_ptr());
+            }
+        }
     }
 }
 
@@ -204,10 +213,10 @@ mod tests {
         let loan1_capacity = loan.capacity();
         drop(loan);
 
-        assert_eq!(bank.available_indeces.borrow()[0], 0);
+        assert_eq!(bank.list.borrow().len(), 1);
 
         let loan2 = bank.take_loan();
-        assert!(bank.available_indeces.borrow().is_empty());
+        assert!(bank.list.borrow().is_empty());
         assert_eq!(loan2.capacity(), loan1_capacity);
         assert_eq!(*loan2, vec![1, 2, 3, 4, 5]);
     }
@@ -225,25 +234,25 @@ mod tests {
         loan1[5] = 2;
         loan2[3] = 5;
 
-        drop(loan2);
-        assert_eq!(*bank.available_indeces.borrow(), vec![1]);
+        let loan1_vec = loan1.clone();
+        let loan2_vec = loan2.clone();
 
+        let loan2_ptr = loan2.reference.clone();
+        drop(loan2);
+        assert_eq!(loan2_ptr, bank.list.borrow()[0]);
+
+        let loan1_ptr = loan1.reference.clone();
         drop(loan1);
-        assert_eq!(*bank.available_indeces.borrow(), vec![1, 0]);
+        assert_eq!([loan2_ptr, loan1_ptr], **bank.list.borrow());
 
         let loan3 = bank.take_loan();
         let loan4 = bank.take_loan();
 
-        assert!(bank.available_indeces.borrow().is_empty());
+        assert!(bank.list.borrow().is_empty());
 
         drop(bank);
 
-        let mut loan1_vec = (0..100).collect::<Vec<i32>>();
-        loan1_vec[5] = 2;
         assert_eq!(*loan3, loan1_vec);
-
-        let mut loan2_vec = (0..500).collect::<Vec<i32>>();
-        loan2_vec[3] = 5;
         assert_eq!(*loan4, loan2_vec);
     }
 
