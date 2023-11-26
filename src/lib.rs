@@ -115,26 +115,23 @@ pub struct MemoryBank<T> {
     list: Rc<RefCell<Vec<NonNull<T>>>>,
 }
 
-impl<T: Default> Default for MemoryBank<T> {
+impl<T> Default for MemoryBank<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
 impl<T: Default> MemoryBank<T> {
-    /// Creates a new, empty `MemoryBank<T>`. The first loan is guaranteed to be a heap allocation.
-    pub fn new() -> Self {
-        Self {
-            list: Rc::new(RefCell::new(Vec::new()))
-        }
-    }
-
     /// Loans the user some memory to use. Will reuse an element from old memory if there are any, otherwise it will allocate on the heap.
     ///
     /// If the loaned memory was previously used, it will be in the exact same state it was in
     /// right before the previous `Loan` got dropped.
     pub fn take_loan(&mut self) -> Loan<T> {
-        let ptr = self.list.borrow_mut().pop().unwrap_or_else(|| Self::create_ptr(T::default()));
+        let ptr = self
+            .list
+            .borrow_mut()
+            .pop()
+            .unwrap_or_else(|| Self::create_ptr(T::default()));
 
         Loan {
             reference: ptr,
@@ -143,12 +140,32 @@ impl<T: Default> MemoryBank<T> {
     }
 }
 
-impl<T: Clone + Default> MemoryBank<T> {
+impl<T: Clone> MemoryBank<T> {
     /// Takes out a loan and clones its contents from `item`
+    ///
+    ///
+    /// # Example
+    /// ```
+    /// use membank::MemoryBank;
+    ///
+    /// let mut bank = MemoryBank::new();
+    ///
+    /// let v = vec![1, 2, 3, 4, 5, 6];
+    ///
+    /// let loan = bank.take_loan_and_clone(&v);
+    ///
+    /// assert_eq!(v, *loan);
+    /// ```
     pub fn take_loan_and_clone(&mut self, item: &T) -> Loan<T> {
-        let mut loan = self.take_loan();
-        loan.clone_from(item);
-        loan
+        let ptr = match self.list.borrow_mut().pop() {
+            Some(nn_ptr) => nn_ptr,
+            None => Self::create_ptr(item.clone()),
+        };
+
+        Loan {
+            reference: ptr,
+            parent_list: Rc::downgrade(&self.list),
+        }
     }
 }
 
@@ -160,7 +177,28 @@ impl<T> MemoryBank<T> {
         NonNull::from(Box::leak(bx))
     }
 
+    /// Creates a new, empty `MemoryBank<T>`. The first loan is guaranteed to be a heap allocation.
+    pub fn new() -> Self {
+        Self {
+            list: Rc::new(RefCell::new(Vec::new())),
+        }
+    }
+
     /// Gives the bank ownership of `value` and returns it in a `Loan`.
+    ///
+    /// # Examples
+    /// ```
+    /// use membank::MemoryBank;
+    ///
+    /// let mut bank = MemoryBank::new();
+    ///
+    /// let v = vec![2.1, 4.3, 1.0, 0.98];
+    /// let v_clone = v.clone();
+    ///
+    /// let loan = bank.deposit(v);
+    ///
+    /// assert_eq!(*loan, v_clone);
+    /// ```
     pub fn deposit(&mut self, value: T) -> Loan<T> {
         let ptr = Self::create_ptr(value);
 
@@ -172,6 +210,22 @@ impl<T> MemoryBank<T> {
 
     /// Only take a loan if it's from previously used memory, if there is no previously allocated
     /// memory, returns `None`.
+    ///
+    ///
+    /// # Example
+    /// ```
+    /// use membank::MemoryBank;
+    ///
+    /// let mut bank: MemoryBank<Vec<i32>> = MemoryBank::new();
+    /// assert!(bank.take_old_loan().is_none());
+    ///
+    /// let loan1 = bank.take_loan();
+    ///
+    /// assert!(bank.take_old_loan().is_none());
+    ///
+    /// drop(loan1);
+    /// assert!(bank.take_old_loan().is_some());
+    /// ```
     pub fn take_old_loan(&mut self) -> Option<Loan<T>> {
         let ptr = self.list.borrow_mut().pop()?;
 
