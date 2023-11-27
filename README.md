@@ -5,7 +5,7 @@ The membank crate allows users to re-use memory for later instead of de-allocati
 
 
 ```rust
-use membank::*;
+use membank::unsync::MemoryBank;
 
 fn main() {
 	let mut bank: MemoryBank<Vec<i32>> = MemoryBank::new();
