@@ -129,7 +129,7 @@ pub mod unsync {
         /// Loans the user some memory to use. Will reuse an element from old memory if there are any, otherwise it will allocate on the heap.
         ///
         /// If the loaned memory was previously used, it will be in the exact same state it was in
-        /// right before the previous `Loan` got dropped.
+        /// right before the previous [`Loan`] got dropped.
         pub fn take_loan(&mut self) -> Loan<T> {
             let ptr = self
                 .list
@@ -188,7 +188,7 @@ pub mod unsync {
             }
         }
 
-        /// Gives the bank ownership of `value` and returns it in a `Loan`.
+        /// Gives the bank ownership of `value` and returns it in a [`Loan`].
         ///
         /// # Examples
         /// ```
@@ -448,6 +448,24 @@ pub mod sync {
     /// Thread-safe version of [`MemoryBank`](crate::unsync::MemoryBank).
     ///
     /// Has interior mutability, so the user only needs to wrap it in an [Arc] to transfer it between threads.
+	///
+	/// # Example
+	/// ```
+    /// use membank::sync::MemoryBank;
+    /// use std::sync::Arc;
+    ///
+    /// let bank = Arc::new(MemoryBank::new());
+    ///
+    /// let v = vec![0, 4, 5];
+    ///
+    /// let loan1 = bank.take_loan_and_clone(&v).unwrap();
+    /// 
+    /// let bank_clone = Arc::clone(&bank);
+    /// std::thread::spawn(move || {
+    ///     let loan2 = bank_clone.take_loan_and_clone(&v).unwrap();
+    ///     assert_eq!(loan1, loan2);
+    /// });
+    /// ```
     pub struct MemoryBank<T> {
         list: Arc<Mutex<Vec<Arc<T>>>>,
     }
@@ -460,9 +478,12 @@ pub mod sync {
 
     impl<T: Default> MemoryBank<T> {
         /// Loans the user some memory to use. Will reuse an element from old memory if there are any, otherwise it will allocate on the heap.
+		///
+        /// # Errors
+		/// If another user of the bank panicked while holding it, an error will be returned.
         ///
         /// If the loaned memory was previously used, it will be in the exact same state it was in
-        /// right before the previous `Loan` got dropped.
+        /// right before the previous [`Loan`] got dropped.
         pub fn take_loan(&self) -> LockResult<Loan<T>, T> {
             let ptr = match self.list.lock() {
                 Ok(mut list) => match list.pop() {
@@ -480,7 +501,10 @@ pub mod sync {
     }
 
     impl<T: Clone> MemoryBank<T> {
-        /// Takes out a loan and clones its contents from `item`
+        /// Takes out a loan and clones its contents from `item`.
+		///
+        /// # Errors
+		/// If another user of the bank panicked while holding it, an error will be returned.
         ///
         ///
         /// # Example
@@ -519,7 +543,7 @@ pub mod sync {
             }
         }
 
-        /// Gives the bank ownership of `value` and returns it in a `Loan`.
+        /// Gives the bank ownership of `value` and returns it in a [`Loan`].
         ///
         /// # Examples
         /// ```
@@ -545,7 +569,8 @@ pub mod sync {
 
         /// Only take a loan if it's from previously used memory, if there is no previously allocated
         /// memory, returns `None`.
-        ///
+        /// # Errors
+		/// If another user of the bank panicked while holding it, an error will be returned.
         ///
         /// # Example
         /// ```
