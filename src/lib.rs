@@ -568,7 +568,7 @@ pub mod sync {
     impl<T: Default> MemoryBank<NonBlockingDrop, T> {
         /// Loans the user some memory to use. Will reuse an element from old memory if there are any, otherwise it will allocate on the heap.
         ///
-        /// It's possible for this function to block the thread if other threads are requesting loans or loans are being dropped. To take a loan without blocking the thread, use [`Self::take_new_loan`].
+        /// Will wait if the bank's internal mutex is locked by another thread.
         ///
         /// # Errors
         /// If another user of the bank panicked while holding it, an error will be returned.
@@ -593,7 +593,7 @@ pub mod sync {
     impl<T: Default> MemoryBank<BlockingDrop, T> {
         /// Loans the user some memory to use. Will reuse an element from old memory if there are any, otherwise it will allocate on the heap.
         ///
-        /// It's possible for this function to block the thread if other threads are requesting loans or loans are being dropped. To take a loan without blocking the thread, use [`Self::take_new_loan`](crate::sync::MemoryBank#method.take_new_loan-1).
+        /// Will wait if the bank's internal mutex is locked by another thread.
         ///
         /// # Errors
         /// If another user of the bank panicked while holding it, an error will be returned.
@@ -626,6 +626,8 @@ pub mod sync {
     impl<T: Clone> MemoryBank<BlockingDrop, T> {
         /// Takes out a loan and clones its contents from `item`.
         ///
+        /// Will wait if the bank's internal mutex is locked by another thread.
+        ///
         /// # Errors
         /// If another user of the bank panicked while holding it, an error will be returned.
         ///
@@ -650,21 +652,22 @@ pub mod sync {
     }
 
     impl<T> MemoryBank<NonBlockingDrop, T> {
+        /// Gives the bank ownership of `value` and returns it in a [`Loan`].
+        ///
+        /// Will wait if the bank's internal mutex is locked by another thread.
         pub fn deposit(&self, value: T) -> Loan<NonBlockingDrop, T> {
             Loan::new_nonblocking(value, self.tx.as_ref().unwrap().clone())
         }
 
         pub fn take_old_loan(&self) -> LockResult<Option<Loan<NonBlockingDrop, T>>, T> {
             // TODO: better return type?
-            let value = match self.list.lock()?.pop() {
-                Some(v) => v,
-                None => return Ok(None),
-            };
-
-            Ok(Some(Loan::new_nonblocking(
-                value,
-                self.tx.as_ref().unwrap().clone(),
-            )))
+            match self.list.lock()?.pop() {
+                Some(value) => Ok(Some(Loan::new_nonblocking(
+                    value,
+                    self.tx.as_ref().unwrap().clone(),
+                ))),
+                None => Ok(None),
+            }
         }
     }
 
@@ -674,6 +677,8 @@ pub mod sync {
         }
 
         /// Gives the bank ownership of `value` and returns it in a [`Loan`].
+        ///
+        /// Will wait if the bank's internal mutex is locked by another thread.
         ///
         /// # Examples
         /// ```
@@ -713,12 +718,10 @@ pub mod sync {
         /// ```
         pub fn take_old_loan(&self) -> LockResult<Option<Loan<BlockingDrop, T>>, T> {
             // TODO: better return type?
-            let value = match self.list.lock()?.pop() {
-                Some(v) => v,
-                None => return Ok(None),
-            };
-
-            Ok(Some(Loan::new_blocking(value, Arc::downgrade(&self.list))))
+            match self.list.lock()?.pop() {
+                Some(value) => Ok(Some(Loan::new_blocking(value, Arc::downgrade(&self.list)))),
+                None => Ok(None),
+            }
         }
     }
 
