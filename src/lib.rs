@@ -356,26 +356,27 @@ pub mod unsync {
 pub mod sync {
     use super::*;
     use std::marker::{PhantomData, Send, Sync};
+    use std::mem::ManuallyDrop;
     use std::sync::mpsc::{channel, Sender};
     use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
     pub struct BlockingDrop;
     pub struct NonBlockingDrop;
 
-    pub type LockResult<'a, R, C> = Result<R, PoisonError<MutexGuard<'a, Vec<Arc<C>>>>>;
+    pub type LockResult<'a, R, C> = Result<R, PoisonError<MutexGuard<'a, Vec<C>>>>;
 
     /// Thread-safe version of [`Loan`](crate::unsync::Loan).
     pub struct Loan<State, T> {
-        reference: Arc<T>,
-        tx: Option<Sender<Arc<T>>>,
-        parent_list: Option<Weak<Mutex<Vec<Arc<T>>>>>,
+        reference: ManuallyDrop<T>,
+        tx: Option<Sender<T>>,
+        parent_list: Option<Weak<Mutex<Vec<T>>>>,
         state: PhantomData<State>,
     }
 
     impl<T> Loan<NonBlockingDrop, T> {
-        fn new_nonblocking(reference: Arc<T>, tx: Sender<Arc<T>>) -> Self {
+        fn new_nonblocking(value: T, tx: Sender<T>) -> Self {
             Self {
-                reference,
+                reference: ManuallyDrop::new(value),
                 tx: Some(tx),
                 parent_list: None,
                 state: PhantomData::<NonBlockingDrop>,
@@ -384,9 +385,9 @@ pub mod sync {
     }
 
     impl<T> Loan<BlockingDrop, T> {
-        fn new_blocking(reference: Arc<T>, parent_list: Weak<Mutex<Vec<Arc<T>>>>) -> Self {
+        fn new_blocking(value: T, parent_list: Weak<Mutex<Vec<T>>>) -> Self {
             Self {
-                reference,
+                reference: ManuallyDrop::new(value),
                 tx: None,
                 parent_list: Some(parent_list),
                 state: PhantomData::<BlockingDrop>,
@@ -396,13 +397,13 @@ pub mod sync {
 
     impl<State, T> AsRef<T> for Loan<State, T> {
         fn as_ref(&self) -> &T {
-            self.reference.as_ref()
+            &self.reference
         }
     }
 
     impl<State, T> AsMut<T> for Loan<State, T> {
         fn as_mut(&mut self) -> &mut T {
-            Arc::get_mut(&mut self.reference).unwrap()
+            &mut self.reference
         }
     }
 
@@ -410,24 +411,26 @@ pub mod sync {
         type Target = T;
 
         fn deref(&self) -> &Self::Target {
-            self.reference.deref()
+            &self.reference
         }
     }
 
     impl<State, T> DerefMut for Loan<State, T> {
         fn deref_mut(&mut self) -> &mut Self::Target {
-            Arc::get_mut(&mut self.reference).unwrap()
+            &mut self.reference
         }
     }
 
     impl<State, T> Drop for Loan<State, T> {
         fn drop(&mut self) {
-            if let Some(tx) = self.tx.as_ref() {
-                tx.send(Arc::clone(&self.reference)).unwrap();
-            } else if let Some(parent_list) = self.parent_list.as_ref() {
-                if let Some(parent_list_mutex) = parent_list.upgrade() {
-                    if let Ok(mut parent_list) = parent_list_mutex.lock() {
-                        parent_list.push(Arc::clone(&self.reference));
+            unsafe {
+                if let Some(tx) = self.tx.as_ref() {
+                    let _ = tx.send(ManuallyDrop::take(&mut self.reference));
+                } else if let Some(parent_list) = self.parent_list.as_ref() {
+                    if let Some(parent_list_mutex) = parent_list.upgrade() {
+                        if let Ok(mut parent_list) = parent_list_mutex.lock() {
+                            parent_list.push(ManuallyDrop::take(&mut self.reference));
+                        }
                     }
                 }
             }
@@ -436,31 +439,25 @@ pub mod sync {
 
     impl<State, T: fmt::Debug> fmt::Debug for Loan<State, T> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            fmt::Debug::fmt(&**self, f)
+            fmt::Debug::fmt(&self, f)
         }
     }
 
     impl<State, T: fmt::Display> fmt::Display for Loan<State, T> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            fmt::Display::fmt(&**self, f)
-        }
-    }
-
-    impl<State, T> fmt::Pointer for Loan<State, T> {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            fmt::Pointer::fmt(&self.reference, f)
+            fmt::Display::fmt(&self, f)
         }
     }
 
     impl<State, T: Hash> Hash for Loan<State, T> {
         fn hash<H: Hasher>(&self, state: &mut H) {
-            (**self).hash(state)
+            self.as_ref().hash(state)
         }
     }
 
     impl<State, T: PartialEq> PartialEq for Loan<State, T> {
         fn eq(&self, other: &Self) -> bool {
-            (**self).eq(&**other)
+            self.as_ref().eq(other)
         }
     }
 
@@ -468,13 +465,13 @@ pub mod sync {
 
     impl<State, T: PartialOrd> PartialOrd for Loan<State, T> {
         fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-            (**self).partial_cmp(&**other)
+            self.as_ref().partial_cmp(other)
         }
     }
 
     impl<State, T: Ord> Ord for Loan<State, T> {
         fn cmp(&self, other: &Self) -> Ordering {
-            (**self).cmp(&**other)
+            self.as_ref().cmp(other)
         }
     }
 
@@ -500,14 +497,14 @@ pub mod sync {
     /// });
     /// ```
     pub struct MemoryBank<State, T> {
-        list: Arc<Mutex<Vec<Arc<T>>>>,
-        tx: Option<Sender<Arc<T>>>,
+        list: Arc<Mutex<Vec<T>>>,
+        tx: Option<Sender<T>>,
         state: PhantomData<State>,
     }
 
     impl<T: Send + Sync + 'static> Default for MemoryBank<NonBlockingDrop, T> {
         fn default() -> Self {
-            let (tx, rx) = channel::<Arc<T>>();
+            let (tx, rx) = channel::<T>();
 
             let list = Arc::new(Mutex::new(Vec::new()));
 
@@ -535,7 +532,7 @@ pub mod sync {
 
         #[cfg(test)]
         fn new_nonblocking_with_notifier(notifier: Sender<()>) -> Self {
-            let (tx, rx) = channel::<Arc<T>>();
+            let (tx, rx) = channel::<T>();
 
             let list = Arc::new(Mutex::new(Vec::new()));
 
@@ -579,20 +576,17 @@ pub mod sync {
         /// If the loaned memory was previously used, it will be in the exact same state it was in
         /// right before the previous [`Loan`] got dropped.
         pub fn take_loan(&self) -> LockResult<Loan<NonBlockingDrop, T>, T> {
-            let ptr = match self.list.lock()?.pop() {
-                Some(arc) => arc,
-                None => Arc::new(T::default()),
-            };
+            let value = self.list.lock()?.pop().unwrap_or_default();
 
             Ok(Loan::new_nonblocking(
-                ptr,
+                value,
                 self.tx.as_ref().unwrap().clone(),
             ))
         }
 
         /// Loans out a new empty allocation. Will not block the thread.
         pub fn take_new_loan(&self) -> Loan<NonBlockingDrop, T> {
-            Loan::new_nonblocking(Arc::new(T::default()), self.tx.as_ref().unwrap().clone())
+            Loan::new_nonblocking(T::default(), self.tx.as_ref().unwrap().clone())
         }
     }
 
@@ -607,29 +601,23 @@ pub mod sync {
         /// If the loaned memory was previously used, it will be in the exact same state it was in
         /// right before the previous [`Loan`] got dropped.
         pub fn take_loan(&self) -> LockResult<Loan<BlockingDrop, T>, T> {
-            let ptr = match self.list.lock()?.pop() {
-                Some(arc) => arc,
-                None => Arc::new(T::default()),
-            };
+            let value = self.list.lock()?.pop().unwrap_or_default();
 
-            Ok(Loan::new_blocking(ptr, Arc::downgrade(&self.list)))
+            Ok(Loan::new_blocking(value, Arc::downgrade(&self.list)))
         }
 
         /// Loans out a new empty allocation. Never has to wait for a mutex lock.
         pub fn take_new_loan(&self) -> Loan<BlockingDrop, T> {
-            Loan::new_blocking(Arc::new(T::default()), Arc::downgrade(&self.list))
+            Loan::new_blocking(T::default(), Arc::downgrade(&self.list))
         }
     }
 
     impl<T: Clone> MemoryBank<NonBlockingDrop, T> {
         pub fn take_loan_and_clone(&self, item: &T) -> LockResult<Loan<NonBlockingDrop, T>, T> {
-            let ptr = match self.list.lock()?.pop() {
-                Some(arc) => arc,
-                None => Arc::new(item.clone()),
-            };
+            let value = self.list.lock()?.pop().unwrap_or_else(|| item.clone());
 
             Ok(Loan::new_nonblocking(
-                ptr,
+                value,
                 self.tx.as_ref().unwrap().clone(),
             ))
         }
@@ -655,10 +643,7 @@ pub mod sync {
         /// assert_eq!(v, *loan);
         /// ```
         pub fn take_loan_and_clone(&self, item: &T) -> LockResult<Loan<BlockingDrop, T>, T> {
-            let ptr = match self.list.lock()?.pop() {
-                Some(arc) => arc,
-                None => Arc::new(item.clone()),
-            };
+            let ptr = self.list.lock()?.pop().unwrap_or_else(|| item.clone());
 
             Ok(Loan::new_blocking(ptr, Arc::downgrade(&self.list)))
         }
@@ -666,20 +651,18 @@ pub mod sync {
 
     impl<T> MemoryBank<NonBlockingDrop, T> {
         pub fn deposit(&self, value: T) -> Loan<NonBlockingDrop, T> {
-            let ptr = Arc::new(value);
-
-            Loan::new_nonblocking(ptr, self.tx.as_ref().unwrap().clone())
+            Loan::new_nonblocking(value, self.tx.as_ref().unwrap().clone())
         }
 
         pub fn take_old_loan(&self) -> LockResult<Option<Loan<NonBlockingDrop, T>>, T> {
             // TODO: better return type?
-            let ptr = match self.list.lock()?.pop() {
-                Some(arc) => arc,
+            let value = match self.list.lock()?.pop() {
+                Some(v) => v,
                 None => return Ok(None),
             };
 
             Ok(Some(Loan::new_nonblocking(
-                ptr,
+                value,
                 self.tx.as_ref().unwrap().clone(),
             )))
         }
@@ -706,9 +689,7 @@ pub mod sync {
         /// assert_eq!(*loan, v_clone);
         /// ```
         pub fn deposit(&self, value: T) -> Loan<BlockingDrop, T> {
-            let ptr = Arc::new(value);
-
-            Loan::new_blocking(ptr, Arc::downgrade(&self.list))
+            Loan::new_blocking(value, Arc::downgrade(&self.list))
         }
 
         /// Only take a loan if it's from previously used memory, if there is no previously allocated
@@ -732,12 +713,12 @@ pub mod sync {
         /// ```
         pub fn take_old_loan(&self) -> LockResult<Option<Loan<BlockingDrop, T>>, T> {
             // TODO: better return type?
-            let ptr = match self.list.lock()?.pop() {
-                Some(arc) => arc,
+            let value = match self.list.lock()?.pop() {
+                Some(v) => v,
                 None => return Ok(None),
             };
 
-            Ok(Some(Loan::new_blocking(ptr, Arc::downgrade(&self.list))))
+            Ok(Some(Loan::new_blocking(value, Arc::downgrade(&self.list))))
         }
     }
 
@@ -784,7 +765,39 @@ pub mod sync {
         }
 
         #[test]
-        fn blocking_multiloan() {}
+        fn blocking_multiloan() {
+            let bank: MemoryBank<BlockingDrop, Vec<i32>> = MemoryBank::default();
+
+            let mut loan1 = bank.take_loan().unwrap();
+            let mut loan2 = bank.take_loan().unwrap();
+
+            loan1.clone_from(&(0..100).collect());
+            loan2.clone_from(&(0..500).collect());
+
+            loan1[5] = 2;
+            loan2[3] = 5;
+
+            let loan1_vec = loan1.clone();
+            let loan2_vec = loan2.clone();
+
+            let loan2_clone = loan2.clone();
+            drop(loan2);
+            assert_eq!(loan2_clone, bank.list.lock().unwrap()[0]);
+
+            let loan1_clone = loan1.clone();
+            drop(loan1);
+            assert_eq!([loan2_clone, loan1_clone], **bank.list.lock().unwrap());
+
+            let loan3 = bank.take_loan().unwrap();
+            let loan4 = bank.take_loan().unwrap();
+
+            assert!(bank.list.lock().unwrap().is_empty());
+
+            drop(bank);
+
+            assert_eq!(*loan3, loan1_vec);
+            assert_eq!(*loan4, loan2_vec);
+        }
 
         #[test]
         fn nonblocking_multiloan() {
@@ -805,15 +818,15 @@ pub mod sync {
             let loan1_vec = loan1.clone();
             let loan2_vec = loan2.clone();
 
-            let loan2_ptr = Arc::clone(&loan2.reference);
+            let loan2_clone = loan2.clone();
             drop(loan2);
             assert!(rx.recv().is_ok());
-            assert_eq!(loan2_ptr, bank.list.lock().unwrap()[0]);
+            assert_eq!(loan2_clone, bank.list.lock().unwrap()[0]);
 
-            let loan1_ptr = Arc::clone(&loan1.reference);
+            let loan1_clone = loan1.clone();
             drop(loan1);
             assert!(rx.recv().is_ok());
-            assert_eq!([loan2_ptr, loan1_ptr], **bank.list.lock().unwrap());
+            assert_eq!([loan2_clone, loan1_clone], **bank.list.lock().unwrap());
 
             let loan3 = bank.take_loan().unwrap();
             let loan4 = bank.take_loan().unwrap();
