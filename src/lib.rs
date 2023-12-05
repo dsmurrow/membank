@@ -126,29 +126,6 @@ impl<T: Default> MemoryBank<T> {
     }
 }
 
-impl<T: Clone> MemoryBank<T> {
-    /// Takes out a loan and clones its contents from `item`
-    ///
-    ///
-    /// # Example
-    /// ```
-    /// use membank::MemoryBank;
-    ///
-    /// let bank = MemoryBank::new();
-    ///
-    /// let v = vec![1, 2, 3, 4, 5, 6];
-    ///
-    /// let loan = bank.take_loan_and_clone(&v);
-    ///
-    /// assert_eq!(v, *loan);
-    /// ```
-    pub fn take_loan_and_clone(&self, item: &T) -> Loan<T> {
-        let value = self.rx.try_recv().unwrap_or(item.clone());
-
-        Loan::new(value, self.tx.clone())
-    }
-}
-
 impl<T> MemoryBank<T> {
     /// Creates a new, empty `MemoryBank<T>`. The first loan is guaranteed to be a heap allocation.
     pub fn new() -> Self {
@@ -319,11 +296,12 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn bank_between_threads() {
-        let bank = MemoryBank::default();
+        let bank: MemoryBank<Vec<i32>> = MemoryBank::default();
 
         let mut v1 = vec![0, 2, 3, 5];
 
-        let mut loan = bank.take_loan_and_clone(&v1);
+        let mut loan = bank.take_loan();
+        loan.clone_from(&v1);
         loan[0] = 1;
         v1[0] = 1;
 
@@ -352,11 +330,12 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn loan_between_threads() {
-        let bank = MemoryBank::default();
+        let bank: MemoryBank<Vec<i32>> = MemoryBank::default();
 
         let mut v = vec![17, 23, 1, 4, 5];
 
-        let mut loan = bank.take_loan_and_clone(&v);
+        let mut loan = bank.take_loan();
+        loan.clone_from(&v);
         loan[0] = 3;
         v[0] = 3;
 
