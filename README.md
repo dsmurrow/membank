@@ -5,10 +5,10 @@ The membank crate allows users to re-use memory for later instead of de-allocati
 
 
 ```rust
-use membank::unsync::MemoryBank;
+use membank::MemoryBank;
 
 fn main() {
-	let mut bank: MemoryBank<Vec<i32>> = MemoryBank::new();
+	let bank: MemoryBank<Vec<i32>> = MemoryBank::new();
 
 	let mut big_dumb_vec = Vec::from_iter(0..10000);
 
@@ -28,8 +28,14 @@ fn main() {
 	drop(loan);
 
 	// The bank reuses memory whenever it can
-	let same_memory = bank.take_loan();
+	let same_memory = bank.take_old_loan().unwrap();
 	assert_eq!(*same_memory, big_dumb_vec);
+
+	// The same bank can also be shared between threads!
+	let bank_clone = bank.clone();
+	std::thread::spawn(move || {
+		assert_eq!(*bank.take_loan(), big_dumb_vec);
+	});
 }
 ```
 
